@@ -41,15 +41,23 @@ export function hasOnlyOpenedAutomaticReview(policy: Pick<GitHubReviewPolicy, "e
   return automatic.length === 1 && automatic[0] === "opened" && policy.issueOpened !== true;
 }
 
+export function matchesGitHubJourneyEnvironment(environment: { id: string; driver: string; config: Record<string, unknown> }, id: string, kind: "local" | "daytona") {
+  return environment.id === id && (kind === "local" ? environment.driver === "local"
+    : environment.driver === "sandbox" && environment.config.provider === "daytona");
+}
+
 export function verifyGitHubReviewRun(run: Record<string, any> | undefined, expected: {
   runId: string | null; companyId: string; agentId: string; issueId: string;
-  runtimeMode: string; environmentId?: string; provider: string; model: string;
+  runtimeMode: string; environmentId: string; executionEnvironment: "local" | "daytona";
+  environment: { id: string; driver: string; config: Record<string, unknown> }; provider: string; model: string;
 }) {
   const provider = run?.runnerProfileJson?.nativeExecutionInput?.provider;
   return Boolean(run && run.id === expected.runId && run.companyId === expected.companyId
     && run.agentId === expected.agentId && run.issueId === expected.issueId
     && run.status === "succeeded" && run.runtimeMode === expected.runtimeMode
-    && (!expected.environmentId || run.contextSnapshot?.paperclipEnvironment?.id === expected.environmentId)
+    && matchesGitHubJourneyEnvironment(expected.environment, expected.environmentId, expected.executionEnvironment)
+    && run.contextSnapshot?.paperclipEnvironment?.id === expected.environmentId
+    && run.contextSnapshot?.paperclipEnvironment?.driver === expected.environment.driver
     && (expected.runtimeMode !== "native" || (provider?.kind === expected.provider && provider?.model === expected.model)));
 }
 

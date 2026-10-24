@@ -3,10 +3,10 @@ import type { GitHubTaskReview } from "../../packages/shared/src/types/chat-gith
 import type { GitHubRepositoryPage } from "../../packages/shared/src/types/chat-channels.js";
 import { ConnectionBlock, ConnectionFailure } from "./connection-config.js";
 import { ConnectionApi } from "./connection-target.js";
-import { awaitJourneyCondition, createGitHubJourneyPullRequest, observeGitHubHead, selectGitHubJourneyRepository } from "./github-review-browser.js";
-import { githubCartFixture, hasOnlyOpenedAutomaticReview, retainGitHubReview, verifyGitHubReview, verifyGitHubReviewRun, type GitHubReviewJourneyEvidence } from "./github-review-evidence.js";
+import { awaitJourneyCondition, createGitHubJourneyPullRequest, enterGitHubJourneyCompany, observeGitHubHead, selectGitHubJourneyRepository } from "./github-review-browser.js";
+import { githubCartFixture, hasOnlyOpenedAutomaticReview, matchesGitHubJourneyEnvironment, retainGitHubReview, verifyGitHubReview, verifyGitHubReviewRun, type GitHubReviewJourneyEvidence } from "./github-review-evidence.js";
 import type { GitHubReviewJourneyConfig } from "./github-review-config.js";
-import { captureOwnedGitHubApp, type GitHubJourneyResources } from "./github-review-ownership.js";
+import { captureOwnedGitHubApp, readOwnedGitHubReviewRuns, type GitHubJourneyResources } from "./github-review-ownership.js";
 import { attendGitHubJourneyAction } from "./github-review-attendance.js";
 
 export async function runGitHubReviewFlow(input: {
@@ -21,7 +21,10 @@ export async function runGitHubReviewFlow(input: {
   if (capabilities.enableGitHubReviewBots !== true) throw new ConnectionBlock("blocked_target", "github_review_capability_unavailable");
   const company = await api.get(`/api/companies/${config.target.companyId}`);
   const agent = await api.get(`/api/agents/${config.agent.id}`);
-  if (agent.companyId !== company.id || agent.name !== config.agent.name || !["idle", "running"].includes(agent.status)) throw new ConnectionBlock("blocked_target", "configured_review_agent_unavailable");
+  if (company.id !== config.target.companyId || agent.companyId !== company.id || agent.name !== config.agent.name || !["idle", "running"].includes(agent.status)) throw new ConnectionBlock("blocked_target", "configured_review_agent_unavailable");
+  const environment = await api.get(`/api/environments/${config.target.environmentId}`);
+  if (agent.defaultEnvironmentId !== environment.id || environment.status !== "active"
+    || !matchesGitHubJourneyEnvironment(environment, config.target.environmentId, config.executionEnvironment)) throw new ConnectionBlock("blocked_target", "configured_review_environment_mismatch");
   // The profile is explicit about the provider/model it claims to qualify.
   if (JSON.stringify(agent.adapterConfig ?? {}).includes(config.agent.model) === false) throw new ConnectionBlock("blocked_target", "configured_agent_model_mismatch");
   // Record effective accounting prerequisites without granting or changing them.
@@ -31,6 +34,7 @@ export async function runGitHubReviewFlow(input: {
       .map((p: any) => ({ scopeType: p.scopeType, amount: p.amount, hardStopEnabled: p.hardStopEnabled, unpricedUsagePolicy: p.unpricedUsagePolicy }));
     evidence.budgetPolicyRead = "verified";
   } catch { evidence.budgetPolicyRead = "unavailable"; }
+  await enterGitHubJourneyCompany(page, api.origin, company);
   await input.checkpoint("agent", page);
   await input.phase("connector_navigation");
   await page.getByRole("link", { name: "Connectors", exact: true }).click();
@@ -158,8 +162,8 @@ export async function runGitHubReviewFlow(input: {
   await input.checkpoint("automatic_task", page);
   await awaitJourneyCondition(async () => {
     review = await api.get(`/api/chat-endpoints/${endpoint.id}/github/reviews/${review!.id}`);
-    const runs = await api.get<any[]>(`/api/companies/${company.id}/heartbeat-runs?issueId=${review!.issueId}&limit=100`);
-    resources.runIds = runs.filter(r => r.issueId === review!.issueId).map(r => r.id);
+    const runs = await readOwnedGitHubReviewRuns(api, { companyId: company.id, agentId: agent.id, issueId: review!.issueId });
+    resources.runIds = runs.map(r => r.id);
     if (resources.runIds.length > config.maximumRuns) throw new ConnectionFailure("review_run_limit_exceeded");
     if (["error", "incomplete", "superseded", "manual_required"].includes(review!.state)) throw new ConnectionFailure("review_terminal_failure");
     return review!.state === "completed";
@@ -172,8 +176,8 @@ export async function runGitHubReviewFlow(input: {
   await awaitJourneyCondition(async () => {
     review = await api.get(`/api/chat-endpoints/${endpoint.id}/github/reviews/${review!.id}`);
     evidence.review = retainGitHubReview(review!);
-    const runs = await api.get<any[]>(`/api/companies/${company.id}/heartbeat-runs?agentId=${agent.id}&limit=100`);
-    resources.runIds = runs.filter(r => r.issueId === review!.issueId).map(r => r.id);
+    const runs = await readOwnedGitHubReviewRuns(api, { companyId: company.id, agentId: agent.id, issueId: review!.issueId });
+    resources.runIds = runs.map(r => r.id);
     if (resources.runIds.length > config.maximumRuns) throw new ConnectionFailure("review_run_limit_exceeded");
     issue = await api.get(`/api/issues/${review!.issueId}`);
     completedRun = review!.runId ? await api.get(`/api/heartbeat-runs/${review!.runId}`) : undefined;
@@ -188,7 +192,8 @@ export async function runGitHubReviewFlow(input: {
     return completedRun?.status === "succeeded" && issue.status === "done";
   }, config.deadlineMs, "review_execution_completion_timeout", input.signal, "failed");
   if (!verifyGitHubReviewRun(completedRun, { runId: review!.runId, companyId: company.id, agentId: agent.id, issueId: review!.issueId,
-    runtimeMode: config.agent.runtimeMode, environmentId: config.target.environmentId, provider: config.agent.provider, model: config.agent.model })) throw new ConnectionFailure("review_run_binding_mismatch");
+    runtimeMode: config.agent.runtimeMode, environmentId: config.target.environmentId, executionEnvironment: config.executionEnvironment,
+    environment: await api.get(`/api/environments/${config.target.environmentId}`), provider: config.agent.provider, model: config.agent.model })) throw new ConnectionFailure("review_run_binding_mismatch");
   evidence.dependencies.find(d => d.alias === "review-agent-provider")!.status = "ready";
   if (!verifyGitHubReview({ review: review!, issue, companyId: company.id, endpointId: endpoint.id, issueId: review!.issueId, repository: config.github.repository,
     pullNumber: resources.pullNumber, headSha, agentId: agent.id })) throw new ConnectionFailure("review_oracle_failed");

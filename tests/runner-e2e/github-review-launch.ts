@@ -12,7 +12,7 @@ import { createPrivateJourneyRepository, ensureGitHubJourneyLogin, closeOwnedGit
 import { loadGitHubReviewJourneyConfig } from "./github-review-config.js";
 import { gradeGitHubReviewJourney, type GitHubReviewJourneyEvidence } from "./github-review-evidence.js";
 import { runGitHubReviewFlow } from "./github-review-flow.js";
-import { captureOwnedGitHubApp, type GitHubJourneyResources } from "./github-review-ownership.js";
+import { captureOwnedGitHubApp, readOwnedGitHubReviewRuns, type GitHubJourneyResources } from "./github-review-ownership.js";
 import { JourneyDependencyError, resolveJourneyCredential } from "./journey-dependencies.js";
 import { sanitizeJson, assertSecretFree } from "./redaction.js";
 import { writeGitHubReviewReport } from "./github-review-report.js";
@@ -174,10 +174,8 @@ export async function runGitHubReviewCampaign(input: { executions: readonly Matr
           if (resources.issueId) {
             const issue = await api.get(`/api/issues/${resources.issueId}`);
             if (issue.companyId !== config!.target.companyId || issue.assigneeAgentId !== config!.agent.id) throw new ConnectionFailure("cleanup_issue_owner_mismatch");
-            const rows = await api.get<any[]>(`/api/companies/${config!.target.companyId}/heartbeat-runs?issueId=${resources.issueId}&limit=100`);
-            const boundRuns = rows.filter(run => run.issueId === resources.issueId && run.agentId === config!.agent.id && run.companyId === config!.target.companyId);
+            const boundRuns = await readOwnedGitHubReviewRuns(api, { companyId: config!.target.companyId, agentId: config!.agent.id, issueId: resources.issueId });
             resources.runIds = [...new Set([...resources.runIds, ...boundRuns.map(run => run.id)])];
-            if (rows.length === 100) cleanupErrors.push("owned_run_inventory_may_be_truncated");
           }
           await save("owned-resources.json", resources);
           await api.post(`/api/chat-endpoints/${resources.endpointId}/setup`, { action: "remove" });
@@ -244,8 +242,7 @@ export async function runGitHubReviewCampaign(input: { executions: readonly Matr
       await save("owned-resources.json", resources);
       if (api && resources.issueId && config) {
         try {
-          const rows = await api.get<any[]>(`/api/companies/${config.target.companyId}/heartbeat-runs?issueId=${resources.issueId}&limit=100`);
-          const runs = rows.filter(r => r.issueId === resources.issueId);
+          const runs = await readOwnedGitHubReviewRuns(api, { companyId: config.target.companyId, agentId: config.agent.id, issueId: resources.issueId });
           result.runtimeUsage = buildRuntimeUsage({ environmentId: execution.environment.id, runs, fallbackFinishedAt: new Date().toISOString() });
           result.billing = summarizeExecutionBilling({ ...result, usage: { runs: runs.map(r => ({ usage: r.usageJson })) } });
         } catch { /* Missing billing remains unavailable; never substitute zero. */ }

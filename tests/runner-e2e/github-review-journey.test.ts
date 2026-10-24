@@ -8,14 +8,40 @@ import type { GitHubTaskReview } from "../../packages/shared/src/types/chat-gith
 import { verifyConnectionTarget } from "./connection-target.js";
 import { parseConnectionConfig } from "./connection-config.js";
 import type { APIRequestContext } from "@playwright/test";
-import { captureOwnedGitHubApp, type GitHubJourneyResources } from "./github-review-ownership.js";
+import { captureOwnedGitHubApp, readOwnedGitHubReviewRuns, type GitHubJourneyResources } from "./github-review-ownership.js";
 import type { ChatEndpoint } from "../../packages/shared/src/types/chat-channels.js";
-import { isGitHubJourneyEvidencePage } from "./github-review-browser.js";
+import { enterGitHubJourneyCompany, isGitHubJourneyEvidencePage } from "./github-review-browser.js";
 import { attendGitHubJourneyAction } from "./github-review-attendance.js";
 import { PassThrough } from "node:stream";
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { validateRetainedRunnerResult } from "./result-validation.js";
 import { runGitHubReviewCampaign } from "./github-review-launch.js";
+import type { ConnectionApi } from "./connection-target.js";
+
+describe("reused target ownership", () => {
+  it("enters the configured company before using its navigation despite remembered browser state", async () => {
+    let current = new URL("https://qa.example.test/OTHER/dashboard");
+    const page = { goto: vi.fn(async (url: string) => { current = new URL(url); }),
+      waitForURL: vi.fn(async (predicate: (url: URL) => boolean) => { expect(predicate(current)).toBe(true); }) };
+    await enterGitHubJourneyCompany(page as unknown as Page, current.origin, { issuePrefix: "QA" });
+    expect(current.pathname).toBe("/QA/dashboard");
+  });
+  it("finds the owned run outside company history windows and excludes related foreign-task activity", async () => {
+    const get = vi.fn(async (route: string) => {
+      if (route === "/api/issues/issue/runs") return [{ runId: "old-owned" }, { runId: "related" }, { runId: "old-owned" }];
+      if (route === "/api/heartbeat-runs/old-owned") return { id: "old-owned", companyId: "company", agentId: "agent", issueId: "issue" };
+      if (route === "/api/heartbeat-runs/related") return { id: "related", companyId: "company", agentId: "agent", issueId: "other-issue" };
+      throw new Error("company_history_must_not_be_used");
+    });
+    const runs = await readOwnedGitHubReviewRuns({ get } as unknown as Pick<ConnectionApi, "get">, { companyId: "company", agentId: "agent", issueId: "issue" });
+    expect(runs.map(run => run.id)).toEqual(["old-owned"]);
+    expect(get).toHaveBeenCalledTimes(3);
+  });
+  it("rejects a foreign company in hydrated run inventory", async () => {
+    const get = vi.fn(async (route: string) => route.endsWith("/runs") ? [{ runId: "foreign" }] : { id: "foreign", companyId: "other", agentId: "agent", issueId: "issue" });
+    await expect(readOwnedGitHubReviewRuns({ get } as unknown as Pick<ConnectionApi, "get">, { companyId: "company", agentId: "agent", issueId: "issue" })).rejects.toThrow("issue_run_company_mismatch");
+  });
+});
 
 describe("governed campaign admission", () => {
   it("rejects operations-managed selection before opening credentials or browsers", async () => {
@@ -56,9 +82,17 @@ describe("retained journey metadata", () => {
 });
 
 describe("review execution attribution", () => {
-  const expected = { runId: "run", companyId: "company", agentId: "agent", issueId: "issue", runtimeMode: "native", environmentId: "sandbox", provider: "opencode", model: "configured-model" };
+  const expected = { runId: "run", companyId: "company", agentId: "agent", issueId: "issue", runtimeMode: "native", environmentId: "sandbox", executionEnvironment: "daytona" as const,
+    environment: { id: "sandbox", driver: "sandbox", config: { provider: "daytona" } }, provider: "opencode", model: "configured-model" };
   const run = () => ({ id: "run", companyId: "company", agentId: "agent", issueId: "issue", status: "succeeded", runtimeMode: "native",
-    contextSnapshot: { paperclipEnvironment: { id: "sandbox" } }, runnerProfileJson: { nativeExecutionInput: { provider: { kind: "opencode", model: "configured-model" } } } });
+    contextSnapshot: { paperclipEnvironment: { id: "sandbox", driver: "sandbox" } }, runnerProfileJson: { nativeExecutionInput: { provider: { kind: "opencode", model: "configured-model" } } } });
+  it("rejects a mismatched environment kind or provider even when the ID matches", () => {
+    expect(verifyGitHubReviewRun(run(), { ...expected, executionEnvironment: "local" })).toBe(false);
+    expect(verifyGitHubReviewRun(run(), { ...expected, environment: { ...expected.environment, config: { provider: "fake" } } })).toBe(false);
+    expect(verifyGitHubReviewRun({ ...run(), contextSnapshot: { paperclipEnvironment: { id: "sandbox", driver: "local" } } }, expected)).toBe(false);
+    const local = { ...run(), contextSnapshot: { paperclipEnvironment: { id: "local", driver: "local" } } };
+    expect(verifyGitHubReviewRun(local, { ...expected, executionEnvironment: "local", environmentId: "local", environment: { id: "local", driver: "local", config: {} } })).toBe(true);
+  });
   it("requires the actual successful native run, environment, provider, and model", () => {
     expect(verifyGitHubReviewRun(run(), expected)).toBe(true);
     expect(verifyGitHubReviewRun(undefined, expected)).toBe(false);
@@ -145,12 +179,17 @@ describe("durable journey credential references", () => {
   });
 });
 
-const config = () => ({ version: 1, setupId: "qa-test", hosting: "paperclip-cloud", target: { mode: "attach", baseURL: "https://qa.example.test", expectedCommit: "a".repeat(40), deploymentMode: "authenticated", companyId: "11111111-1111-4111-8111-111111111111" },
+const config = () => ({ version: 1, setupId: "qa-test", hosting: "paperclip-cloud", target: { mode: "attach", baseURL: "https://qa.example.test", expectedCommit: "a".repeat(40), deploymentMode: "authenticated", companyId: "11111111-1111-4111-8111-111111111111", environmentId: "22222222-2222-4222-8222-222222222222" },
   browser: { headed: true, channel: "chrome", profileDir: "/private/qa-browser", accountAlias: "ralph-qa", freshness: "signed-in" },
   agent: { id: "22222222-2222-4222-8222-222222222222", name: "Ponytail QA", skill: "ponytail-review", model: "configured-model", provider: "openai", runtimeMode: "native" },
   github: { repository: "fixture/ponytail-evals", ownerType: "personal", appOwner: "fixture", login: "passkey", username: { source: "onepassword", reference: "op://vault/item/username" } } });
 
 describe("setup profiles and selection", () => {
+  it("requires an actual environment binding for every selected cell", () => {
+    const value = config();
+    const { environmentId: _environmentId, ...target } = value.target;
+    expect(() => parseGitHubReviewJourneyConfig({ ...value, target })).toThrow("invalid_github_journey_configuration");
+  });
   it("verifies a protected hosted target through the authenticated session without following redirects", async () => {
     const get = vi.fn(async () => ({ ok: () => true, json: async () => ({ commit: "a".repeat(40), deploymentMode: "authenticated" }) }));
     await expect(verifyConnectionTarget("https://qa.example.test", parseConnectionConfig({ target: config().target }), { get } as unknown as APIRequestContext)).resolves.toMatchObject({ commit: "a".repeat(40) });

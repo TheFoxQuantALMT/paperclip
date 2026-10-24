@@ -9,7 +9,7 @@ export interface GitHubReviewJourneyConfig {
   setupId: string;
   hosting: "self-hosted" | "paperclip-cloud";
   executionEnvironment: "local" | "daytona";
-  target: Extract<ConnectionConfig["target"], { mode: "attach" }> & { companyId: string };
+  target: Extract<ConnectionConfig["target"], { mode: "attach" }> & { companyId: string; environmentId: string };
   browser: ConnectionConfig["browser"];
   authentication?: { module: string; configFile: string };
   agent: { id: string; name: string; skill: string; model: string; provider: string; runtimeMode: "native" | "legacy" };
@@ -47,7 +47,7 @@ export function parseGitHubReviewJourneyConfig(input: unknown): GitHubReviewJour
     const authentication = v.authentication === undefined ? undefined : object(v.authentication, ["module", "configFile"]);
     if (authentication && (!path.isAbsolute(text(authentication.module)) || !path.isAbsolute(text(authentication.configFile)))) return invalid();
     return { version: 1, setupId: text(v.setupId, /^[a-z0-9-]{1,80}$/), hosting: v.hosting, executionEnvironment: v.executionEnvironment ?? "local",
-      target: { ...common.target, baseURL: targetOrigin(common.target.baseURL), companyId: text(target.companyId, uuid) }, browser: common.browser,
+      target: { ...common.target, baseURL: targetOrigin(common.target.baseURL), companyId: text(target.companyId, uuid), environmentId: text(target.environmentId, uuid) }, browser: common.browser,
       ...(authentication ? { authentication: { module: authentication.module, configFile: authentication.configFile } } : {}),
       agent: { id: text(agent.id, uuid), name: text(agent.name), skill: text(agent.skill, /^[a-z0-9-]+$/), model: text(agent.model), provider: text(agent.provider), runtimeMode: agent.runtimeMode },
       github: { repository: text(github.repository, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), ownerType: github.ownerType, appOwner: text(github.appOwner, /^[A-Za-z0-9-]+$/),

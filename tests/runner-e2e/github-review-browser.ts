@@ -3,6 +3,13 @@ import { ConnectionBlock, ConnectionFailure } from "./connection-config.js";
 import { connectionDelay } from "./connection-target.js";
 import type { GitHubReviewJourneyConfig } from "./github-review-config.js";
 
+export async function enterGitHubJourneyCompany(page: Page, origin: string, company: { issuePrefix: string }) {
+  if (!/^[A-Za-z0-9]+$/.test(company.issuePrefix)) throw new ConnectionFailure("invalid_journey_company_prefix");
+  const pathname = `/${company.issuePrefix}/dashboard`;
+  await page.goto(`${origin}${pathname}`);
+  await page.waitForURL(url => url.origin === origin && url.pathname === pathname);
+}
+
 /** Capture measured pages only, excluding authentication and unrelated GitHub data. */
 export function isGitHubJourneyEvidencePage(value: string, targetOrigin: string, repository: string, appSlug?: string) {
   const url = new URL(value);

@@ -1,6 +1,17 @@
 import type { ChatEndpoint } from "../../packages/shared/src/types/chat-channels.js";
 import { ConnectionFailure } from "./connection-config.js";
 import type { GitHubReviewJourneyConfig } from "./github-review-config.js";
+import type { ConnectionApi } from "./connection-target.js";
+
+/** The issue run source includes history beyond company list windows. Related
+ * activity can name a run for another task, so hydrate and check direct ownership. */
+export async function readOwnedGitHubReviewRuns(api: Pick<ConnectionApi, "get">, scope: { companyId: string; agentId: string; issueId: string }) {
+  const rows = await api.get<Array<{ runId: string }>>(`/api/issues/${scope.issueId}/runs`);
+  if (!Array.isArray(rows) || rows.some(row => typeof row.runId !== "string" || !row.runId)) throw new ConnectionFailure("invalid_issue_run_inventory");
+  const runs = await Promise.all([...new Set(rows.map(row => row.runId))].map(id => api.get<Record<string, any>>(`/api/heartbeat-runs/${id}`)));
+  if (runs.some(run => run.companyId !== scope.companyId)) throw new ConnectionFailure("issue_run_company_mismatch");
+  return runs.filter(run => run.issueId === scope.issueId && run.agentId === scope.agentId);
+}
 
 export interface GitHubJourneyResources {
   endpointId?: string; pullNumber?: number; branch: string; appName: string;
