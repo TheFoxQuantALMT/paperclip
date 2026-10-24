@@ -97,7 +97,14 @@ The initial agent JWT run lookup reads only the cancellation state and
 conversation flag from saved run JSON. It does not transfer the full context or
 result. Run status, responsible-user identity, company and agent boundaries,
 and the cancellation response remain unchanged. Later identity refreshes keep
-their existing transaction and data reads.
+their current authorization and transaction boundaries.
+
+Chat recovery ancestry selects task identifiers and source-run links instead
+of full execution payloads. Instruction authorization selects current identity
+fields and still rechecks accepted identity, key revocation, and membership.
+Identity task locks and activation receipts project typed legacy task keys with
+the native and first-class issue IDs. These projections preserve task binding
+precedence and validation without transferring prompts or output.
 
 To measure authentication query responses on disposable synthetic data:
 
