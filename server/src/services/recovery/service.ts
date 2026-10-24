@@ -3428,6 +3428,7 @@ export function recoveryService(
 
   async function sourceHasNewPathOutsideRecoveryAction(
     action: typeof issueRecoveryActions.$inferSelect,
+    assigneeAgentId: string | null,
   ) {
     const [run, wake] = await Promise.all([
       db
@@ -3451,11 +3452,15 @@ export function recoveryService(
         .where(
           and(
             eq(agentWakeupRequests.companyId, action.companyId),
-            inArray(agentWakeupRequests.status, [
-              "queued",
-              "claimed",
-              "deferred_issue_execution",
-            ]),
+            or(
+              inArray(agentWakeupRequests.status, ["queued", "claimed"]),
+              and(
+                eq(agentWakeupRequests.status, "deferred_issue_execution"),
+                assigneeAgentId
+                  ? eq(agentWakeupRequests.agentId, assigneeAgentId)
+                  : sql`true`,
+              ),
+            ),
             sql`coalesce(${agentWakeupRequests.payload} ->> 'issueId', ${agentWakeupRequests.payload} ->> 'taskId') = ${action.sourceIssueId}`,
             sql`coalesce(${agentWakeupRequests.payload} ->> 'recoveryActionId', '') <> ${action.id}`,
           ),
@@ -3540,7 +3545,7 @@ export function recoveryService(
         await Promise.all([
           collectDispositionRepairSourceState(db, { issue }),
           healthyOpenChildIssues(issue),
-          sourceHasNewPathOutsideRecoveryAction(action),
+          sourceHasNewPathOutsideRecoveryAction(action, issue.assigneeAgentId),
         ]);
       const durablePathRestored =
         action.ownerType !== "board" && sourceState.hasDurableWaitingPath;

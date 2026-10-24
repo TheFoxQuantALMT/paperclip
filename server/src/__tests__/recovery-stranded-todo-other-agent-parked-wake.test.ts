@@ -5,8 +5,10 @@ import {
   agents,
   agentWakeupRequests,
   companies,
+  companyMemberships,
   createDb,
   heartbeatRuns,
+  issueRecoveryActions,
   issues,
 } from "@paperclipai/db";
 import {
@@ -40,6 +42,14 @@ describeEmbeddedPostgres("stranded todo sweep and other agents' parked wakes", (
       id: companyId,
       name: "Handoff Co",
       issuePrefix: `H${companyId.slice(0, 6)}`,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({
+      companyId,
+      principalType: "user",
+      principalId: "responsible-user",
+      status: "active",
+      membershipRole: "member",
     });
     await db.insert(agents).values([
       { id: previousAgentId, companyId, name: "Reviewer", role: "engineer", status: "idle", adapterType: "codex_local" },
@@ -118,6 +128,52 @@ describeEmbeddedPostgres("stranded todo sweep and other agents' parked wakes", (
         payload: expect.objectContaining({ issueId: f.issueId, retryOfRunId: f.previousRun.id }),
       }),
     );
+    const parked = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.agentId, f.previousAgentId));
+    expect(parked).toHaveLength(1);
+    expect(parked[0]).toMatchObject({ status: "deferred_issue_execution", runId: null });
+  });
+
+  it("escalates to blocked when the assignee's exhausted dispatch leaves only another agent's parked wake", async () => {
+    const f = await seedHandoff("previous");
+    await db.insert(heartbeatRuns).values({
+      companyId: f.companyId,
+      agentId: f.assigneeAgentId,
+      issueId: f.issueId,
+      invocationSource: "assignment",
+      triggerDetail: "system",
+      status: "interrupted",
+      errorCode: "server_shutdown_interrupted",
+      error: "Interrupted by graceful server shutdown (SIGTERM)",
+      scheduledRetryAttempt: 2,
+      scheduledRetryReason: "transient_failure",
+      contextSnapshot: { issueId: f.issueId, taskId: f.issueId, wakeReason: "transient_failure_retry" },
+      resultJson: { stopReason: "interrupted", conversationContinuation: "continue_conversation_v1" },
+      createdAt: new Date(Date.now() - 3 * 60_000),
+      startedAt: new Date(Date.now() - 3 * 60_000),
+      finishedAt: new Date(Date.now() - 2 * 60_000),
+      updatedAt: new Date(Date.now() - 2 * 60_000),
+    });
+    const enqueueWakeup = vi.fn();
+
+    const result = await recoveryService(db, {
+      enqueueWakeup,
+      scheduleRecoveryRetry: async () => null,
+      transientRetryBudgetSpent: () => true,
+    }).reconcileStrandedAssignedIssues();
+
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ escalated: 1, dispatchRequeued: 0, issueIds: [f.issueId] });
+    const [issue] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    expect(issue).toMatchObject({ status: "blocked", assigneeAgentId: f.assigneeAgentId });
+    const actions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ status: "active", ownerType: "board", returnOwnerAgentId: f.assigneeAgentId });
     const parked = await db
       .select()
       .from(agentWakeupRequests)
