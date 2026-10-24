@@ -17,8 +17,28 @@ import type { Locator, Page } from "@playwright/test";
 import { validateRetainedRunnerResult } from "./result-validation.js";
 import { runGitHubReviewCampaign } from "./github-review-launch.js";
 import type { ConnectionApi } from "./connection-target.js";
+import { runGitHubReviewFlow } from "./github-review-flow.js";
 
 describe("reused target ownership", () => {
+  it("admits an inherited environment before setup and still leaves actual-run verification mandatory", async () => {
+    const setup = parseGitHubReviewJourneyConfig(config());
+    const company = { id: setup.target.companyId, issuePrefix: "QA" };
+    const rows: Record<string, unknown> = {
+      "/api/instance/settings/experimental": { enableGitHubReviewBots: true },
+      [`/api/companies/${company.id}`]: company,
+      [`/api/agents/${setup.agent.id}`]: { companyId: company.id, name: setup.agent.name, status: "idle", defaultEnvironmentId: null, adapterConfig: { model: setup.agent.model } },
+      [`/api/environments/${setup.target.environmentId}`]: { id: setup.target.environmentId, driver: "local", status: "active", config: {} },
+      [`/api/companies/${company.id}/budgets/overview`]: { policies: [] },
+    };
+    const api = { origin: setup.target.baseURL, get: async (route: string) => rows[route] };
+    const page = { goto: async () => {}, waitForURL: async () => {} };
+    await expect(runGitHubReviewFlow({ api: api as unknown as ConnectionApi, page: page as unknown as Page, github: {} as Page,
+      githubUsername: "fixture", config: setup, resources: { branch: "owned", appName: "owned", runIds: [] },
+      evidence: { version: 1, setupId: "qa", hosting: "paperclip-cloud", targetCommit: null, assisted: false, outcome: "running", phase: "setup", dependencies: [], checkpoints: {}, cleanup: { endpoint: true, app: true, pullRequest: true, branch: true } },
+      signal: new AbortController().signal, phase: async () => {}, persistResources: async () => {},
+      checkpoint: async id => { if (id === "agent") throw new Error("preflight_admitted"); },
+    })).rejects.toThrow("preflight_admitted");
+  });
   it("enters the configured company before using its navigation despite remembered browser state", async () => {
     let current = new URL("https://qa.example.test/OTHER/dashboard");
     const page = { goto: vi.fn(async (url: string) => { current = new URL(url); }),

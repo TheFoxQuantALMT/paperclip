@@ -23,7 +23,10 @@ export async function runGitHubReviewFlow(input: {
   const agent = await api.get(`/api/agents/${config.agent.id}`);
   if (company.id !== config.target.companyId || agent.companyId !== company.id || agent.name !== config.agent.name || !["idle", "running"].includes(agent.status)) throw new ConnectionBlock("blocked_target", "configured_review_agent_unavailable");
   const environment = await api.get(`/api/environments/${config.target.environmentId}`);
-  if (agent.defaultEnvironmentId !== environment.id || environment.status !== "active"
+  // Inheritance and task trust policy can select the environment without an
+  // agent override. Validate the declared target now; the actual run binding
+  // remains authoritative after dispatch.
+  if (environment.status !== "active"
     || !matchesGitHubJourneyEnvironment(environment, config.target.environmentId, config.executionEnvironment)) throw new ConnectionBlock("blocked_target", "configured_review_environment_mismatch");
   // The profile is explicit about the provider/model it claims to qualify.
   if (JSON.stringify(agent.adapterConfig ?? {}).includes(config.agent.model) === false) throw new ConnectionBlock("blocked_target", "configured_agent_model_mismatch");
